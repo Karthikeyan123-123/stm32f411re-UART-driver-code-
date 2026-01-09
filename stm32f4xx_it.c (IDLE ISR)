@@ -1,0 +1,22 @@
+#include "uart_driver.h"
+
+#define USART2_SR (*(volatile uint32_t*)0x40004400)
+#define USART2_DR (*(volatile uint32_t*)0x40004404)
+#define DMA1_S5CR (*(volatile uint32_t*)0x40026088)
+#define DMA1_S5NDTR (*(volatile uint32_t*)0x4002608C)
+
+void USART2_IRQHandler(void)
+{
+    if (USART2_SR & (1 << 4)) // IDLE
+    {
+        volatile uint32_t tmp;
+        tmp = USART2_SR;
+        tmp = USART2_DR;
+
+        DMA1_S5CR &= ~1;
+        uart_rx_len = RX_BUF_SIZE - DMA1_S5NDTR;
+
+        DMA1_S5NDTR = RX_BUF_SIZE;
+        DMA1_S5CR |= 1;
+    }
+}
