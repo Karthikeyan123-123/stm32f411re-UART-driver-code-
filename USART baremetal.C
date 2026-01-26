@@ -1,85 +1,92 @@
-#include "uart_driver.h"
+#include "uart_baremetal.h"
 
-/* ================= RCC ================= */
-#define RCC_AHB1ENR   (*(volatile uint32_t*)0x40023830)
-#define RCC_APB1ENR   (*(volatile uint32_t*)0x40023840)
+/* ============================
+   STM32F411RE UART DRIVER (Bare-Metal)
+   Source File
+   USART2: PA2 (TX), PA3 (RX)
+   ============================ */
 
-/* ================= GPIO ================= */
-#define GPIOA_MODER   (*(volatile uint32_t*)0x40020000)
-#define GPIOA_AFRL    (*(volatile uint32_t*)0x40020020)
+#define PERIPH_BASE       0x40000000UL
+#define AHB1PERIPH_BASE   (PERIPH_BASE + 0x00020000UL)
+#define APB1PERIPH_BASE   (PERIPH_BASE + 0x00000000UL)
 
-/* ================= USART2 ================= */
-#define USART2_SR     (*(volatile uint32_t*)0x40004400)
-#define USART2_DR     (*(volatile uint32_t*)0x40004404)
-#define USART2_BRR    (*(volatile uint32_t*)0x40004408)
-#define USART2_CR1    (*(volatile uint32_t*)0x4000440C)
-#define USART2_CR3    (*(volatile uint32_t*)0x40004414)
+#define GPIOA_BASE        (AHB1PERIPH_BASE + 0x0000UL)
+#define RCC_BASE          (AHB1PERIPH_BASE + 0x3800UL)
+#define USART2_BASE       (APB1PERIPH_BASE + 0x4400UL)
 
-/* ================= DMA1 ================= */
-#define DMA1_S5CR     (*(volatile uint32_t*)0x40026088)  // RX
-#define DMA1_S5NDTR   (*(volatile uint32_t*)0x4002608C)
-#define DMA1_S5PAR    (*(volatile uint32_t*)0x40026090)
-#define DMA1_S5M0AR   (*(volatile uint32_t*)0x40026094)
+#define GPIOA_MODER       (*(volatile uint32_t *)(GPIOA_BASE + 0x00))
+#define GPIOA_AFRL        (*(volatile uint32_t *)(GPIOA_BASE + 0x20))
 
-#define DMA1_S6CR     (*(volatile uint32_t*)0x400260A0)  // TX
-#define DMA1_S6NDTR   (*(volatile uint32_t*)0x400260A4)
-#define DMA1_S6PAR    (*(volatile uint32_t*)0x400260A8)
-#define DMA1_S6M0AR   (*(volatile uint32_t*)0x400260AC)
+#define RCC_AHB1ENR       (*(volatile uint32_t *)(RCC_BASE + 0x30))
+#define RCC_APB1ENR       (*(volatile uint32_t *)(RCC_BASE + 0x40))
 
-#define DMA1_HIFCR    (*(volatile uint32_t*)0x4002601C)
+#define USART2_SR         (*(volatile uint32_t *)(USART2_BASE + 0x00))
+#define USART2_DR         (*(volatile uint32_t *)(USART2_BASE + 0x04))
+#define USART2_BRR        (*(volatile uint32_t *)(USART2_BASE + 0x08))
+#define USART2_CR1        (*(volatile uint32_t *)(USART2_BASE + 0x0C))
 
-/* ================= DATA ================= */
-uint8_t uart_rx_buf[RX_BUF_SIZE];
-volatile uint16_t uart_rx_len = 0;
+#define RCC_AHB1ENR_GPIOAEN   (1U << 0)
+#define RCC_APB1ENR_USART2EN (1U << 17)
 
-/* ================= INIT ================= */
-void uart_init(void)
+#define USART_CR1_UE      (1U << 13)
+#define USART_CR1_TE      (1U << 3)
+#define USART_CR1_RE      (1U << 2)
+
+#define USART_SR_TXE      (1U << 7)
+#define USART_SR_RXNE     (1U << 5)
+
+/* =========================================================
+   USART2 INIT FUNCTION
+   ========================================================= */
+void UART2_Init(uint32_t baudrate)
 {
-    /* Clocks */
-    RCC_AHB1ENR |= (1 << 0) | (1 << 21);   // GPIOA, DMA1
-    RCC_APB1ENR |= (1 << 17);              // USART2
+    /* 1. Enable clocks for GPIOA and USART2 */
+    RCC_AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC_APB1ENR |= RCC_APB1ENR_USART2EN;
 
-    /* PA2 TX, PA3 RX */
-    GPIOA_MODER &= ~(0xF << 4);
-    GPIOA_MODER |=  (0xA << 4);
-    GPIOA_AFRL  |=  (0x77 << 8);
+    /* 2. Set PA2 and PA3 to Alternate Function mode */
+    GPIOA_MODER &= ~(0xF << 4);   // Clear MODER2 and MODER3
+    GPIOA_MODER |=  (0xA << 4);   // Set AF mode for PA2, PA3
 
-    /* USART */
-    USART2_BRR = 0x683;  // 9600 @ 16 MHz
-    USART2_CR1 |= (1 << 13) | (1 << 2) | (1 << 3); // UE, RE, TE
-    USART2_CR1 |= (1 << 4); // IDLE interrupt
-    USART2_CR3 |= (1 << 6); // DMAR
+    /* 3. Select AF7 (USART2) for PA2 and PA3 */
+    GPIOA_AFRL &= ~(0xFF << 8);   // Clear AFRL2 and AFRL3
+    GPIOA_AFRL |=  (0x77 << 8);   // AF7 for PA2, PA3
 
-    /* RX DMA */
-    DMA1_S5CR &= ~1;
-    DMA1_S5PAR  = (uint32_t)&USART2_DR;
-    DMA1_S5M0AR = (uint32_t)uart_rx_buf;
-    DMA1_S5NDTR = RX_BUF_SIZE;
-    DMA1_S5CR =
-        (4 << 25) |   // Channel 4
-        (1 << 10) |   // MINC
-        (2 << 16);    // High priority
-    DMA1_S5CR |= 1;
+    /* 4. Configure baud rate (assuming 16 MHz PCLK1) */
+    USART2_BRR = 16000000U / baudrate;
+
+    /* 5. Enable transmitter and receiver */
+    USART2_CR1 |= USART_CR1_TE | USART_CR1_RE;
+
+    /* 6. Enable USART2 */
+    USART2_CR1 |= USART_CR1_UE;
 }
 
-/* ================= TX DMA ================= */
-void uart_tx_dma(uint8_t *buf, uint16_t len)
+/* =========================================================
+   TRANSMIT SINGLE CHARACTER (BLOCKING)
+   ========================================================= */
+void UART2_SendChar(char ch)
 {
-    DMA1_S6CR &= ~1;
-    while (DMA1_S6CR & 1);
+    while (!(USART2_SR & USART_SR_TXE));
+    USART2_DR = (uint8_t)ch;
+}
 
-    DMA1_HIFCR = (0x3F << 16);
+/* =========================================================
+   TRANSMIT STRING (BLOCKING)
+   ========================================================= */
+void UART2_SendString(const char *str)
+{
+    while (*str)
+    {
+        UART2_SendChar(*str++);
+    }
+}
 
-    DMA1_S6PAR  = (uint32_t)&USART2_DR;
-    DMA1_S6M0AR = (uint32_t)buf;
-    DMA1_S6NDTR = len;
-
-    DMA1_S6CR =
-        (4 << 25) |   // Channel 4
-        (1 << 10) |   // MINC
-        (1 << 6)  |   // M2P
-        (2 << 16);
-
-    USART2_CR3 |= (1 << 7); // DMAT
-    DMA1_S6CR |= 1;
+/* =========================================================
+   RECEIVE SINGLE CHARACTER (BLOCKING)
+   ========================================================= */
+char UART2_ReceiveChar(void)
+{
+    while (!(USART2_SR & USART_SR_RXNE));
+    return (char)(USART2_DR & 0xFF);
 }
