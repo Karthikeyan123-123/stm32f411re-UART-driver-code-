@@ -1,14 +1,19 @@
-#ifndef UART_DRIVER_H
-#define UART_DRIVER_H
+#ifndef __UART_BAREMETAL_H
+#define __UART_BAREMETAL_H
 
 #include <stdint.h>
 
-#define RX_BUF_SIZE 64
+/* ============================
+   STM32F411RE UART DRIVER (Bare-Metal)
+   Header File
+   USART2: PA2 (TX), PA3 (RX)
+   ============================ */
 
-void uart_init(void);
-void uart_tx_dma(uint8_t *buf, uint16_t len);
+void UART2_Init(uint32_t baudrate);
 
-extern volatile uint16_t uart_rx_len;
-extern uint8_t uart_rx_buf[RX_BUF_SIZE];
+// Blocking mode APIs
+void UART2_SendChar(char ch);
+void UART2_SendString(const char *str);
+char UART2_ReceiveChar(void);
 
-#endif
+#endif /* __UART_BAREMETAL_H */
